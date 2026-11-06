@@ -3,6 +3,7 @@ import random
 from threading import Event, Thread
 
 from queuelens.transport.sender import EventSender
+
 logger = logging.getLogger(__name__)
 
 
