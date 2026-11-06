@@ -1,44 +1,29 @@
-
 # QueueLens Python SDK
 
-Background job observability for Celery applications.
+QueueLens provides background job observability for Python applications using Celery.
 
-QueueLens captures Celery task lifecycle events and sends them to the
-QueueLens observability platform.
-
-## Features
-
-- Celery task lifecycle instrumentation
-- Task execution event tracking
-- Asynchronous event delivery
-- Batched HTTP ingestion
-- Bounded in-memory event buffering
-- Automatic retry with exponential backoff
-- Duplicate-safe event ingestion
-- Minimal integration with existing Celery applications
+It instruments Celery task lifecycle events and asynchronously delivers them to your QueueLens instance, allowing you to monitor job execution, failures, retries, and worker activity.
 
 ## Requirements
 
 - Python 3.12+
 - Celery 5.6+
-- A QueueLens API key
-- A running QueueLens ingestion API
+- A running QueueLens instance
+- A QueueLens workspace API key
 
 ## Installation
 
-Install QueueLens with Celery support:
+Install the SDK with Celery support:
 
 ```bash
 pip install "queuelens[celery]"
 ```
 
-Using uv:
-
-```bash
-uv add "queuelens[celery]"
-```
+This installs QueueLens and its optional Celery integration dependencies.
 
 ## Quick start
+
+The recommended integration is **Standard Integration**.
 
 ### 1. Configure environment variables
 
@@ -47,140 +32,211 @@ export QUEUELENS_API_KEY="ql_test_your_api_key"
 export QUEUELENS_ENDPOINT="http://localhost:8001/internal/v1/events/batch"
 ```
 
-### 2. Initialize QueueLens
+Replace the example API key and endpoint with the credentials and ingestion endpoint provided by your QueueLens deployment.
+
+### 2. Instrument your Celery application
 
 ```python
 from celery import Celery
 from queuelens import QueueLens
 
-app = Celery(
-    "my_application",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
-)
+app = Celery("orders")
 
 queuelens = QueueLens()
-
 queuelens.instrument(app)
 ```
 
-That's it. QueueLens automatically registers Celery lifecycle signal handlers.
+That's it. QueueLens automatically registers its Celery signal handlers and manages event delivery through a background flusher.
 
-### 3. Run your Celery worker
+You do not need to modify your existing task definitions.
+
+### 3. Run your worker
+
+Start your Celery worker as usual:
 
 ```bash
-celery -A app worker --loglevel=info
+celery -A your_module.app worker --loglevel=info
 ```
 
-QueueLens will capture task lifecycle events and asynchronously send
-them to the configured ingestion endpoint.
+Your task lifecycle events will be captured and delivered to QueueLens.
 
 ## Configuration
 
-QueueLens supports environment variables and explicit constructor arguments.
+QueueLens supports configuration through constructor arguments or environment variables.
 
-| Environment variable | Constructor argument | Default |
+Constructor arguments take precedence over environment variables, which take precedence over defaults.
+
+| Parameter | Environment variable | Default |
 |---|---|---:|
-| `QUEUELENS_API_KEY` | `api_key` | Required |
-| `QUEUELENS_ENDPOINT` | `endpoint` | Required |
-| `QUEUELENS_BATCH_SIZE` | `batch_size` | 100 |
-| `QUEUELENS_FLUSH_INTERVAL` | `flush_interval` | 5 seconds |
-| `QUEUELENS_TIMEOUT` | `timeout` | 5 seconds |
-| `QUEUELENS_BUFFER_CAPACITY` | `buffer_capacity` | 1,000 |
-| `QUEUELENS_MAX_BATCHES_PER_CYCLE` | `max_batches_per_cycle` | 10 |
-| `QUEUELENS_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | 10 seconds |
+| `api_key` | `QUEUELENS_API_KEY` | Required |
+| `endpoint` | `QUEUELENS_ENDPOINT` | Required |
+| `batch_size` | `QUEUELENS_BATCH_SIZE` | 100 |
+| `flush_interval` | `QUEUELENS_FLUSH_INTERVAL` | 5 seconds |
+| `timeout` | `QUEUELENS_TIMEOUT` | 5 seconds |
+| `buffer_capacity` | `QUEUELENS_BUFFER_CAPACITY` | 1,000 |
+| `max_batches_per_cycle` | `QUEUELENS_MAX_BATCHES_PER_CYCLE` | 10 |
+| `shutdown_timeout` | `QUEUELENS_SHUTDOWN_TIMEOUT` | 10 seconds |
 
-Explicit constructor arguments take precedence over environment variables.
-
-### Constructor configuration
+### Configure using Python
 
 ```python
+from celery import Celery
+from queuelens import QueueLens
+
+app = Celery("orders")
+
 queuelens = QueueLens(
     api_key="ql_test_your_api_key",
     endpoint="http://localhost:8001/internal/v1/events/batch",
     batch_size=100,
     flush_interval=5,
     timeout=5,
-    buffer_capacity=1000,
-    max_batches_per_cycle=10,
-    shutdown_timeout=10,
 )
 
 queuelens.instrument(app)
 ```
 
-## Lifecycle management
+### Configure using environment variables
 
-QueueLens manages its background flusher using Celery worker lifecycle
-signals.
+```bash
+export QUEUELENS_API_KEY="ql_test_your_api_key"
+export QUEUELENS_ENDPOINT="http://localhost:8001/internal/v1/events/batch"
 
-You can also explicitly close the client:
+export QUEUELENS_BATCH_SIZE=100
+export QUEUELENS_FLUSH_INTERVAL=5
+export QUEUELENS_TIMEOUT=5
+export QUEUELENS_BUFFER_CAPACITY=1000
+export QUEUELENS_MAX_BATCHES_PER_CYCLE=10
+export QUEUELENS_SHUTDOWN_TIMEOUT=10
+```
+
+Keep API keys in environment variables or a secrets manager. Do not commit credentials to source control.
+
+## Captured events
+
+QueueLens captures the following Celery task lifecycle events:
+
+| Event | Description |
+|---|---|
+| `received` | Task received by a worker |
+| `started` | Task execution started |
+| `succeeded` | Task completed successfully |
+| `failed` | Task execution failed |
+| `retried` | Task was scheduled for retry |
+
+Each event includes available metadata such as:
+
+- Task ID
+- Task name
+- Event type
+- Event timestamp
+- Worker name
+- Queue name
+- Attempt number
+
+The attempt number is derived from Celery's retry count.
+
+## Event delivery
+
+QueueLens delivers events asynchronously so that instrumentation does not need to wait for HTTP requests during task execution.
+
+The SDK uses:
+
+- A bounded in-memory event buffer.
+- Configurable batch sizes.
+- Periodic background flushing.
+- HTTP timeouts.
+- Automatic retries with exponential backoff and jitter.
+- Event acknowledgement after successful ingestion.
+- A final delivery attempt during graceful shutdown.
+
+### Retry behavior
+
+When delivery fails, events remain in the buffer and are retried.
+
+The retry delay uses exponential backoff, starting at approximately one second and increasing up to 30 seconds, with jitter.
+
+Events are acknowledged only after the ingestion response is successfully received and validated.
+
+QueueLens uses event IDs to support duplicate-safe ingestion. This provides retry-safe delivery behavior, not exactly-once delivery.
+
+## Graceful shutdown
+
+QueueLens automatically integrates with Celery worker lifecycle signals.
+
+When a worker shuts down, the SDK:
+
+1. Stops the background event flusher.
+2. Attempts to deliver remaining buffered events.
+3. Closes its HTTP client.
+
+You generally do not need to manage the SDK lifecycle manually.
+
+For explicit cleanup, you can call:
 
 ```python
 queuelens.close()
 ```
 
-The client supports context-manager usage:
+Do not call this while the Celery worker is still expected to capture events.
+
+## Reliability and limitations
+
+QueueLens is designed to keep observability failures isolated from application task execution.
+
+However, there are important limitations:
+
+- **In-memory buffering:** Events are held in process memory and are not persisted to disk.
+- **Process termination:** A crash, forceful termination, or machine failure can result in loss of pending events.
+- **Buffer capacity:** When the buffer is full, new events are dropped and the SDK logs a warning.
+- **Network failures:** Failed deliveries are retried while the process remains alive and events remain buffered.
+- **Graceful shutdown:** The SDK makes a final delivery attempt, but delivery is not guaranteed if the endpoint remains unavailable or the shutdown timeout is exceeded.
+
+The SDK should be treated as an observability integration, not as a replacement for Celery's task reliability mechanisms.
+
+## Logging
+
+QueueLens uses Python's standard logging module.
+
+To enable debug-level SDK logs:
 
 ```python
-with QueueLens() as queuelens:
-    queuelens.instrument(app)
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("queuelens").setLevel(logging.DEBUG)
 ```
 
-Exiting the context manager closes the registered integrations.
+This can help diagnose event capture, delivery failures, retries, and buffer overflow.
 
-Do not use the context manager around a short-lived setup function if the
-Celery worker is expected to continue running after that function returns.
-
-## Multiple Celery applications
-
-One QueueLens client can instrument multiple Celery applications:
+## Example application
 
 ```python
+from celery import Celery
+from queuelens import QueueLens
+
+app = Celery(
+    "orders",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/1",
+)
+
 queuelens = QueueLens()
+queuelens.instrument(app)
 
-queuelens.instrument(app_one)
-queuelens.instrument(app_two)
+
+@app.task
+def process_order(order_id: str):
+    print(f"Processing order: {order_id}")
+    return {"order_id": order_id, "status": "completed"}
 ```
 
-Each application receives its own instrumentation instance.
+Run the worker:
 
-## Event lifecycle
-
-QueueLens captures the following events:
-
-- `received`
-- `started`
-- `succeeded`
-- `failed`
-- `retried`
-
-Events are buffered and delivered asynchronously in batches.
-
-## Delivery guarantees
-
-The current SDK uses an in-memory bounded buffer.
-
-Events are retried when HTTP delivery fails, and duplicate event IDs
-are handled by the ingestion backend.
-
-Pending events may be lost if a worker process crashes or is forcefully
-terminated before delivery.
-
-QueueLens does not currently provide durable disk-backed buffering or
-exactly-once delivery.
-
-See [DELIVERY.md](DELIVERY.md) for detailed delivery guarantees.
-
-## Error handling
-
-QueueLens instrumentation and transport failures are isolated from
-customer task execution.
-
-QueueLens failures should not interrupt your Celery tasks.
-
-Exceptions raised by your actual task functions are not suppressed.
+```bash
+celery -A app worker --loglevel=info
+```
 
 ## License
 
-See the repository license.
+See the repository's license information.
