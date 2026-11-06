@@ -1,0 +1,22 @@
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "queuelens"
+version = "0.1.0"
+description = "Background job observability SDK"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+celery = [
+    "celery>=5.6.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["queuelens"]
