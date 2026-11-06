@@ -290,3 +290,50 @@ def test_stop_flushes_and_closes_sender():
     assert sender.flush_calls >= 2
     assert sender.closed is True
     assert not flusher._thread.is_alive()
+
+def test_stop_returns_false_when_thread_exceeds_timeout():
+    entered = Event()
+    release = Event()
+
+    class BlockingSender(FakeSender):
+        def flush_once(self):
+            self.flush_calls += 1
+
+            if self.flush_calls == 1:
+                entered.set()
+                release.wait(timeout=2)
+
+            return 0
+
+    sender = BlockingSender()
+    flusher = create_flusher(sender, shutdown_timeout=0.05)
+
+    flusher.start()
+
+    try:
+        assert entered.wait(timeout=2)
+        assert flusher.stop() is False
+        assert flusher.is_alive is True
+    finally:
+        release.set()
+        flusher._thread.join(timeout=2)
+
+    assert flusher.is_alive is False
+    assert sender.closed is True
+
+
+def test_stopped_flusher_cannot_be_restarted():
+    sender = FakeSender()
+    flusher = create_flusher(sender, interval=60)
+
+    flusher.start()
+
+    try:
+        assert flusher._thread is not None
+        flusher.stop()
+    finally:
+        if flusher.is_alive:
+            flusher._thread.join(timeout=2)
+
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        flusher.start()

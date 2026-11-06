@@ -1,5 +1,6 @@
+
 import logging
-import os
+from typing import Any, Self
 
 from queuelens.config import QueueLensConfig
 from queuelens.exceptions import QueueLensConfigurationError
@@ -8,43 +9,44 @@ logger = logging.getLogger(__name__)
 
 
 class QueueLens:
+    """Public client for integrating QueueLens with Celery applications."""
+
     def __init__(
         self,
         api_key: str | None = None,
         endpoint: str | None = None,
-        batch_size: int = 100,
-        flush_interval: float = 5.0,
-        timeout: float = 5.0,
-        buffer_capacity: int = 1000,
+        batch_size: int | None = None,
+        flush_interval: float | None = None,
+        timeout: float | None = None,
+        buffer_capacity: int | None = None,
+        max_batches_per_cycle: int | None = None,
+        shutdown_timeout: float | None = None,
     ) -> None:
-        resolved_api_key = api_key or os.getenv("QUEUELENS_API_KEY")
-        resolved_endpoint = endpoint or os.getenv("QUEUELENS_ENDPOINT")
-
-        if not resolved_api_key:
-            raise QueueLensConfigurationError(
-                "Provide api_key or set QUEUELENS_API_KEY"
-            )
-
-        if not resolved_endpoint:
-            raise QueueLensConfigurationError(
-                "Provide endpoint or set QUEUELENS_ENDPOINT"
-            )
-
         try:
-            self._config = QueueLensConfig(
-                api_key=resolved_api_key,
-                endpoint=resolved_endpoint,
+            self._config = QueueLensConfig.from_env(
+                api_key=api_key,
+                endpoint=endpoint,
                 batch_size=batch_size,
                 flush_interval=flush_interval,
                 timeout=timeout,
                 buffer_capacity=buffer_capacity,
+                max_batches_per_cycle=max_batches_per_cycle,
+                shutdown_timeout=shutdown_timeout,
             )
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise QueueLensConfigurationError(str(exc)) from exc
 
-        self._integrations = {}
+        self._integrations: dict[int, Any] = {}
+        self._closed = False
 
-    def instrument(self, celery_app):
+    def instrument(self, celery_app: Any) -> Any:
+        """Instrument a Celery application with QueueLens."""
+
+        if self._closed:
+            raise RuntimeError(
+                "QueueLens client is closed and cannot instrument applications"
+            )
+
         from queuelens.instrumentation.celery import CeleryInstrumentation
 
         app_id = id(celery_app)
@@ -57,10 +59,33 @@ class QueueLens:
 
         self._integrations[app_id] = integration
 
+        logger.info("QueueLens instrumented Celery application")
+
         return integration
 
     def close(self) -> None:
-        for integration in self._integrations.values():
-            integration.close()
+        """Close all registered integrations."""
 
-        self._integrations.clear()
+        self._closed = True
+
+        for app_id, integration in list(self._integrations.items()):
+            try:
+                integration.close()
+            except Exception:
+                logger.exception(
+                    "QueueLens failed to close an integration for app %s",
+                    app_id,
+                )
+            else:
+                self._integrations.pop(app_id, None)
+
+        logger.info("QueueLens client shutdown completed")
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            raise RuntimeError("QueueLens client is already closed")
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()

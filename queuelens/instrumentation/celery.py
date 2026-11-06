@@ -17,7 +17,7 @@ class CeleryInstrumentation:
     def __init__(self, config: QueueLensConfig) -> None:
         self._config = config
         self._buffer = EventBuffer(config.buffer_capacity)
-
+        self._celery_app = None
         self._flusher: EventFlusher | None = None
         self._flusher_pid: int | None = None
         self._instrumented = False
@@ -97,45 +97,71 @@ class CeleryInstrumentation:
         except Exception:
             logger.exception("QueueLens failed to capture a job event")
 
-    def _on_task_received(self, request=None, **kwargs: Any) -> None:
-        if request is None:
-            return
+    def _on_task_received(
+        self,
+        sender=None,
+        request=None,
+        **kwargs: Any,
+    ) -> None:
+        try:
+            task = getattr(request, "task", None)
 
-        self._record_event(
-            task_id=getattr(request, "id", None),
-            task_name=getattr(request, "name", None),
-            event_type=JobEventType.RECEIVED,
-            request=request,
-        )
+            if task is not None and not self._belongs_to_app(task):
+                return
+
+            if request is None:
+                return
+
+            self._record_event(
+                task_id=getattr(request, "id", None),
+                task_name=getattr(request, "name", None),
+                event_type=JobEventType.RECEIVED,
+                request=request,
+            )
+        except Exception:
+            logger.exception("QueueLens failed to handle received task signal")
 
     def _on_task_started(
         self,
+        sender=None,
         task_id=None,
         task=None,
         **kwargs: Any,
     ) -> None:
-        if task is None:
-            return
+        try:
+            if not self._belongs_to_app(task):
+                return
 
-        self._record_event(
-            task_id=task_id,
-            task_name=task.name,
-            event_type=JobEventType.STARTED,
-            request=task.request,
-        )
+            if task is None:
+                return
+
+            self._record_event(
+                task_id=task_id,
+                task_name=task.name,
+                event_type=JobEventType.STARTED,
+                request=task.request,
+            )
+        except Exception:
+            logger.exception("QueueLens failed to handle started task signal")
 
     def _on_task_succeeded(self, sender=None, **kwargs: Any) -> None:
-        if sender is None:
-            return
+        try:
+            if not self._belongs_to_app(sender):
+                return
 
-        request = sender.request
+            if sender is None:
+                return
 
-        self._record_event(
-            task_id=request.id,
-            task_name=sender.name,
-            event_type=JobEventType.SUCCEEDED,
-            request=request,
-        )
+            request = sender.request
+
+            self._record_event(
+                task_id=request.id,
+                task_name=sender.name,
+                event_type=JobEventType.SUCCEEDED,
+                request=request,
+            )
+        except Exception:
+            logger.exception("QueueLens failed to handle succeeded task signal")
 
     def _on_task_failed(
         self,
@@ -143,17 +169,23 @@ class CeleryInstrumentation:
         task_id=None,
         **kwargs: Any,
     ) -> None:
-        if sender is None:
-            return
+        try:
+            if not self._belongs_to_app(sender):
+                return
 
-        request = sender.request
+            if sender is None:
+                return
 
-        self._record_event(
-            task_id=task_id or request.id,
-            task_name=sender.name,
-            event_type=JobEventType.FAILED,
-            request=request,
-        )
+            request = sender.request
+
+            self._record_event(
+                task_id=task_id or request.id,
+                task_name=sender.name,
+                event_type=JobEventType.FAILED,
+                request=request,
+            )
+        except Exception:
+            logger.exception("QueueLens failed to handle failed task signal")
 
     def _on_task_retried(
         self,
@@ -161,15 +193,21 @@ class CeleryInstrumentation:
         request=None,
         **kwargs: Any,
     ) -> None:
-        if sender is None or request is None:
-            return
+        try:
+            if not self._belongs_to_app(sender):
+                return
 
-        self._record_event(
-            task_id=request.id,
-            task_name=sender.name,
-            event_type=JobEventType.RETRIED,
-            request=request,
-        )
+            if sender is None or request is None:
+                return
+
+            self._record_event(
+                task_id=request.id,
+                task_name=sender.name,
+                event_type=JobEventType.RETRIED,
+                request=request,
+            )
+        except Exception:
+            logger.exception("QueueLens failed to handle retried task signal")
 
     def _start_flusher(self) -> None:
         current_pid = os.getpid()
@@ -179,29 +217,51 @@ class CeleryInstrumentation:
             self._flusher_pid = current_pid
 
         if self._flusher is not None:
-            return
+            if self._flusher.is_alive:
+                return
 
-        sender = EventSender(
-            buffer=self._buffer,
-            endpoint=self._config.endpoint,
-            api_key=self._config.api_key,
-            batch_size=self._config.batch_size,
-            timeout=self._config.timeout,
-        )
+            # The previous flusher has exited. Its sender is already closed.
+            self._flusher = None
+            self._flusher_pid = None
 
-        self._flusher = EventFlusher(
-            sender=sender,
-            interval=self._config.flush_interval,
-            max_batches_per_cycle=self._config.max_batches_per_cycle,
-            shutdown_timeout=self._config.shutdown_timeout,
-        )
+        sender = None
 
-        self._flusher.start()
+        try:
+            sender = EventSender(
+                buffer=self._buffer,
+                endpoint=self._config.endpoint,
+                api_key=self._config.api_key,
+                batch_size=self._config.batch_size,
+                timeout=self._config.timeout,
+            )
 
-        logger.info(
-            "QueueLens flusher initialized in process %s",
-            current_pid,
-        )
+            flusher = EventFlusher(
+                sender=sender,
+                interval=self._config.flush_interval,
+                max_batches_per_cycle=self._config.max_batches_per_cycle,
+                shutdown_timeout=self._config.shutdown_timeout,
+            )
+
+            flusher.start()
+
+            self._flusher = flusher
+
+            logger.info(
+                "QueueLens flusher initialized in process %s",
+                current_pid,
+            )
+
+        except Exception:
+            logger.exception(
+                "QueueLens failed to initialize event flusher in process %s",
+                current_pid,
+            )
+
+            if sender is not None:
+                try:
+                    sender.close()
+                except Exception:
+                    logger.exception("QueueLens failed to close sender after initialization failure")
 
     def _stop_flusher(self) -> None:
         if self._flusher_pid != os.getpid():
@@ -210,7 +270,15 @@ class CeleryInstrumentation:
         if self._flusher is None:
             return
 
-        self._flusher.stop()
+        try:
+            stopped = self._flusher.stop()
+        except Exception:
+            logger.exception("QueueLens failed to stop event flusher")
+            return
+
+        if not stopped:
+            return
+
         self._flusher = None
         self._flusher_pid = None
 
@@ -250,6 +318,19 @@ class CeleryInstrumentation:
         self._stop_flusher()
         self._instrumented = False
         logger.info("QueueLens Celery instrumentation disabled")
+
+    def _belongs_to_app(self, sender: Any) -> bool:
+        if self._celery_app is None:
+            return True
+
+        sender_app = getattr(sender, "app", None)
+
+        # Some Celery signals do not provide an app-bearing sender.
+        # In those cases, ownership cannot be determined from the sender.
+        if sender_app is None:
+            return True
+
+        return sender_app is self._celery_app
 
     @property
     def dropped_count(self) -> int:

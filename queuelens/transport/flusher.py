@@ -44,8 +44,11 @@ class EventFlusher:
         self._thread: Thread | None = None
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
+        if self._thread is not None:
+            if self._thread.is_alive():
+                return
+
+            raise RuntimeError("EventFlusher cannot be restarted")
 
         self._stop_event.clear()
 
@@ -58,21 +61,24 @@ class EventFlusher:
 
         logger.info("QueueLens event flusher started")
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._stop_event.set()
 
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=self._shutdown_timeout)
+        thread = self._thread
 
-            if self._thread.is_alive():
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self._shutdown_timeout)
+
+            if thread.is_alive():
                 logger.warning(
                     "QueueLens event flusher did not stop within %.1f seconds. "
                     "It will finish in the background.",
                     self._shutdown_timeout,
                 )
-                return
+                return False
 
         logger.info("QueueLens event flusher stopped")
+        return True
 
     
     def _run(self) -> None:
@@ -155,3 +161,7 @@ class EventFlusher:
     def _increase_backoff(self, backoff: float) -> float:
         """Double the backoff, respecting the configured maximum."""
         return min(backoff * 2, self._max_backoff)
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()

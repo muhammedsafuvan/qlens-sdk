@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 [project]
 name = "queuelens"
 version = "0.1.0"
-description = "Background job observability SDK"
+description = "Python SDK for background job observability and Celery instrumentation"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 celery = [
-    "celery>=5.6.3",
+    "celery[redis]>=5.6.3",
 ]
 
 [tool.hatch.build.targets.wheel]

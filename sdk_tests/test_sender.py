@@ -241,3 +241,33 @@ def test_sender_rejects_invalid_batch_size():
             api_key=API_KEY,
             batch_size=0,
         )
+
+def test_unauthorized_response_retains_events():
+    buffer = EventBuffer(capacity=10)
+    event = create_event()
+    buffer.add(event)
+
+    mock_client = MagicMock()
+    mock_client.post.return_value = httpx.Response(
+        401,
+        json={"detail": "Invalid or revoked API key"},
+        request=httpx.Request(
+            "POST",
+            "http://localhost/events",
+        ),
+    )
+
+    sender = EventSender(
+        buffer=buffer,
+        endpoint="http://localhost/events",
+        api_key="invalid-key",
+        client=mock_client,
+    )
+
+    result = sender.flush_once()
+
+    assert result is None
+    assert len(buffer) == 1
+    assert buffer.get_batch(limit=1)[0].event_id == event.event_id
+
+    mock_client.post.assert_called_once()

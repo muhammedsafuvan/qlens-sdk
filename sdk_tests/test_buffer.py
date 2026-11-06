@@ -137,3 +137,25 @@ def test_invalid_batch_limit():
 
     with pytest.raises(ValueError):
         buffer.get_batch(limit=0)
+
+def test_buffer_overflow_drops_new_event():
+    buffer = EventBuffer(capacity=2)
+
+    first_event = create_event()
+    second_event = create_event()
+    third_event = create_event()
+
+    assert buffer.add(first_event) is True
+    assert buffer.add(second_event) is True
+
+    assert buffer.add(third_event) is False
+
+    assert len(buffer) == 2
+    assert buffer.dropped_count == 1
+
+    events = buffer.get_batch(limit=10)
+
+    assert [event.event_id for event in events] == [
+        first_event.event_id,
+        second_event.event_id,
+    ]
