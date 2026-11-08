@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "queuelens"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for background job observability and Celery instrumentation"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,7 +18,15 @@ license-files = ["LICENSE"]
 
 [project.optional-dependencies]
 celery = [
-    "celery[redis]>=5.6.3",
+    "celery>=5.6.3",
+]
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.17.0",
+    "celery>=5.6.3",
+    "twine>=7.0.0",
 ]
 
 [project.urls]
