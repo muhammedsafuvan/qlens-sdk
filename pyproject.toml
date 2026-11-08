@@ -7,16 +7,35 @@ build-backend = "hatchling.build"
 name = "queuelens"
 version = "0.1.0"
 description = "Python SDK for background job observability and Celery instrumentation"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.0",
 ]
+license = "MIT"
+license-files = ["LICENSE"]
 
 [project.optional-dependencies]
 celery = [
     "celery[redis]>=5.6.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/muhammedsafuvan/qlens-sdk"
+Repository = "https://github.com/muhammedsafuvan/qlens-sdk"
+Issues = "https://github.com/muhammedsafuvan/qlens-sdk/issues"
+
 [tool.hatch.build.targets.wheel]
 packages = ["queuelens"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.venv",
+    "/.venv-test",
+    "/.git",
+    "/dist",
+    "/build",
+    "**/__pycache__",
+    "**/*.py[cod]",
+]
