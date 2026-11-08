@@ -1,5 +1,7 @@
 import logging
 import os
+import traceback as traceback_module
+from collections.abc import Mapping
 from typing import Any
 
 from celery import signals
@@ -11,6 +13,9 @@ from queuelens.transport.flusher import EventFlusher
 from queuelens.transport.sender import EventSender
 
 logger = logging.getLogger(__name__)
+
+MAX_EXCEPTION_MESSAGE_LENGTH = 4096
+MAX_TRACEBACK_LENGTH = 16000
 
 
 class CeleryInstrumentation:
@@ -59,6 +64,181 @@ class CeleryInstrumentation:
         self._instrumented = True
         logger.info("QueueLens Celery instrumentation enabled")
 
+    @staticmethod
+    def _get_request_mappings(request: Any) -> list[Mapping[str, Any]]:
+        """Return available Celery request dictionaries."""
+        mappings: list[Mapping[str, Any]] = []
+
+        if request is None:
+            return mappings
+
+        for attribute in ("request_dict", "_request_dict"):
+            try:
+                value = getattr(request, attribute, None)
+            except AttributeError:
+                continue
+
+            if isinstance(value, Mapping):
+                mappings.append(value)
+
+        return mappings
+
+    @classmethod
+    def _get_attempt(cls, request: Any) -> int:
+        """
+        Extract the Celery retry count from different request representations.
+
+        Celery's worker task_received signal and task execution signals can
+        expose different request objects. Check both direct attributes and
+        the underlying request dictionaries.
+        """
+        retry_counts: list[int] = []
+
+        if request is not None:
+            try:
+                direct_retries = getattr(request, "retries", None)
+                if direct_retries is not None:
+                    retry_counts.append(int(direct_retries))
+            except (TypeError, ValueError, AttributeError):
+                pass
+
+        for request_dict in cls._get_request_mappings(request):
+            retries = request_dict.get("retries")
+
+            if retries is None:
+                continue
+
+            try:
+                retry_counts.append(int(retries))
+            except (TypeError, ValueError):
+                continue
+
+        retries = max(retry_counts, default=0)
+        return max(retries + 1, 1)
+
+    @staticmethod
+    def _get_exchange_name(exchange: Any) -> str | None:
+        if exchange is None:
+            return None
+
+        name = getattr(exchange, "name", exchange)
+        return str(name) if name else None
+
+    def _get_delivery_metadata(self, request: Any) -> dict[str, str | None]:
+        """
+        Extract queue, exchange and routing key without guessing.
+
+        Queue names are resolved only when Celery explicitly provides the
+        queue or when a routing key matches a configured queue exactly.
+        """
+        delivery_info = getattr(request, "delivery_info", None) or {}
+
+        if not isinstance(delivery_info, Mapping):
+            delivery_info = {}
+
+        queue_name = delivery_info.get("queue")
+        exchange = self._get_exchange_name(delivery_info.get("exchange"))
+
+        routing_key = delivery_info.get("routing_key")
+        routing_key = str(routing_key) if routing_key else None
+
+        if not queue_name and routing_key and self._celery_app is not None:
+            try:
+                configured_queues = self._celery_app.conf.task_queues or ()
+
+                if isinstance(configured_queues, Mapping):
+                    configured_queues = configured_queues.values()
+
+                for queue in configured_queues:
+                    configured_routing_key = getattr(queue, "routing_key", None)
+
+                    if configured_routing_key != routing_key:
+                        continue
+
+                    configured_name = getattr(queue, "name", None)
+
+                    if configured_name:
+                        queue_name = configured_name
+                        break
+
+                # Resolve the default queue only when its routing key
+                # explicitly matches the delivery routing key.
+                if not queue_name:
+                    default_routing_key = (
+                        self._celery_app.conf.task_default_routing_key
+                    )
+
+                    if (
+                        default_routing_key
+                        and default_routing_key == routing_key
+                    ):
+                        default_queue = self._celery_app.conf.task_default_queue
+                        queue_name = getattr(
+                            default_queue,
+                            "name",
+                            default_queue,
+                        )
+
+            except Exception:
+                logger.debug(
+                    "QueueLens could not resolve configured queue metadata",
+                    exc_info=True,
+                )
+
+        return {
+            "queue_name": str(queue_name) if queue_name else None,
+            "exchange": exchange,
+            "routing_key": routing_key,
+        }
+
+    @staticmethod
+    def _truncate(value: str | None, limit: int) -> str | None:
+        if value is None:
+            return None
+
+        if len(value) <= limit:
+            return value
+
+        suffix = "... [truncated]"
+        return value[: limit - len(suffix)] + suffix
+
+    @classmethod
+    def _format_traceback(
+        cls,
+        exception: BaseException | None,
+        traceback_obj: Any = None,
+        einfo: Any = None,
+    ) -> str | None:
+        """
+        Prefer Celery's formatted traceback, then format the traceback object.
+        """
+        if einfo is not None:
+            formatted = getattr(einfo, "traceback", None)
+
+            if isinstance(formatted, str) and formatted:
+                return cls._truncate(formatted, MAX_TRACEBACK_LENGTH)
+
+        if isinstance(traceback_obj, str) and traceback_obj:
+            return cls._truncate(traceback_obj, MAX_TRACEBACK_LENGTH)
+
+        if exception is not None and traceback_obj is not None:
+            try:
+                formatted_lines = traceback_module.format_exception(
+                    type(exception),
+                    exception,
+                    traceback_obj,
+                )
+                formatted = "".join(formatted_lines)
+
+                return cls._truncate(formatted, MAX_TRACEBACK_LENGTH)
+            except Exception:
+                logger.debug(
+                    "QueueLens could not format exception traceback",
+                    exc_info=True,
+                )
+
+        return None
+
     def _record_event(
         self,
         *,
@@ -66,20 +246,42 @@ class CeleryInstrumentation:
         task_name: str | None,
         event_type: JobEventType,
         request: Any = None,
+        exception: BaseException | None = None,
+        traceback_obj: Any = None,
+        einfo: Any = None,
     ) -> None:
         if not task_id or not task_name:
             return
 
         try:
-            delivery_info = getattr(request, "delivery_info", None) or {}
+            delivery_metadata = self._get_delivery_metadata(request)
+
+            exception_type = None
+            exception_message = None
+            formatted_traceback = None
+
+            if event_type == JobEventType.FAILED and exception is not None:
+                exception_type = type(exception).__name__
+                exception_message = self._truncate(
+                    str(exception),
+                    MAX_EXCEPTION_MESSAGE_LENGTH,
+                )
+                formatted_traceback = self._format_traceback(
+                    exception,
+                    traceback_obj,
+                    einfo,
+                )
 
             event = JobEvent(
                 task_id=task_id,
                 task_name=task_name,
                 event_type=event_type,
                 worker_name=getattr(request, "hostname", None),
-                queue_name=delivery_info.get("queue"),
-                attempt=getattr(request, "retries", 0) + 1,
+                attempt=self._get_attempt(request),
+                **delivery_metadata,
+                exception_type=exception_type,
+                exception_message=exception_message,
+                traceback=formatted_traceback,
             )
 
             if not self._buffer.add(event):
@@ -167,6 +369,9 @@ class CeleryInstrumentation:
         self,
         sender=None,
         task_id=None,
+        exception=None,
+        traceback=None,
+        einfo=None,
         **kwargs: Any,
     ) -> None:
         try:
@@ -183,6 +388,9 @@ class CeleryInstrumentation:
                 task_name=sender.name,
                 event_type=JobEventType.FAILED,
                 request=request,
+                exception=exception,
+                traceback_obj=traceback,
+                einfo=einfo,
             )
         except Exception:
             logger.exception("QueueLens failed to handle failed task signal")
@@ -243,7 +451,6 @@ class CeleryInstrumentation:
             )
 
             flusher.start()
-
             self._flusher = flusher
 
             logger.info(
@@ -261,7 +468,9 @@ class CeleryInstrumentation:
                 try:
                     sender.close()
                 except Exception:
-                    logger.exception("QueueLens failed to close sender after initialization failure")
+                    logger.exception(
+                        "QueueLens failed to close sender after initialization failure"
+                    )
 
     def _stop_flusher(self) -> None:
         if self._flusher_pid != os.getpid():

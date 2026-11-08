@@ -26,6 +26,13 @@ class JobEvent(BaseModel):
     queue_name: str | None = None
     attempt: int = Field(default=1, ge=1)
 
+    exchange: str | None = Field(default=None, max_length=255)
+    routing_key: str | None = Field(default=None, max_length=255)
+
+    exception_type: str | None = Field(default=None, max_length=255)
+    exception_message: str | None = Field(default=None, max_length=4096)
+    traceback: str | None = Field(default=None, max_length=16000)
+
     @field_validator("occurred_at")
     @classmethod
     def require_timezone(cls, value: datetime) -> datetime:
