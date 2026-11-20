@@ -25,7 +25,11 @@ This installs QueueLens and its optional Celery integration dependencies.
 
 The recommended integration is **Standard Integration**.
 
-### 1. Configure environment variables
+### 1. Get API Token
+
+Login in using google account and create API Token: ' https://queuelens.netlify.app/ '
+
+### 2. Configure environment variables
 
 ```bash
 export QUEUELENS_API_KEY="ql_test_your_api_key"
@@ -34,7 +38,7 @@ export QUEUELENS_ENDPOINT="http://localhost:8001/internal/v1/events/batch"
 
 Replace the example API key and endpoint with the credentials and ingestion endpoint provided by your QueueLens deployment.
 
-### 2. Instrument your Celery application
+### 3. Instrument your Celery application
 
 ```python
 from celery import Celery
@@ -50,7 +54,7 @@ That's it. QueueLens automatically registers its Celery signal handlers and mana
 
 You do not need to modify your existing task definitions.
 
-### 3. Run your worker
+### 4. Run your worker
 
 Start your Celery worker as usual:
 
