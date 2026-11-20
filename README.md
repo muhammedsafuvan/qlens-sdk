@@ -27,7 +27,7 @@ The recommended integration is **Standard Integration**.
 
 ### 1. Get API Token
 
-Login in using google account and create API Token: ' https://queuelens.netlify.app/ '
+Log in with your Google account and create an API token: ' https://queuelens.netlify.app/ '
 
 ### 2. Configure environment variables
 
