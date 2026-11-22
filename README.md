@@ -4,6 +4,8 @@ QueueLens provides background job observability for Python applications using Ce
 
 It instruments Celery task lifecycle events and asynchronously delivers them to your QueueLens instance, allowing you to monitor job execution, failures, retries, and worker activity.
 
+Pypi: https://pypi.org/project/queuelens/
+
 ## Requirements
 
 - Python 3.12+
